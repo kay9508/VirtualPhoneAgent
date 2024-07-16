@@ -1,0 +1,157 @@
+variables:
+  # PROJECT VARIABLES
+  PROJECT_TARGET_NAME: "VirtualPhoneAgent-0.0.1-SNAPSHOT.jar"
+  PROJECT_TARGET_NAME_TAG: "${CI_PROJECT_NAME}-1.0-SNAPSHOT-jar-with-dependencies-${CI_PIPELINE_ID}.jar"
+
+  # repository name
+  PROJECT: "VirtualPhoneAgent"
+  PROJECT_IMAGE_NM: "VirtualPhoneAgent"
+  # gitlab login 계정
+  REG_LOGIN_USER: "${CI_REGISTRY_USER}"
+  # CI_REGISTRY_PASSWORD는 gitlab project setting의 variables에서 정의했다.
+  REG_LOGIN_PWD: "${CI_REGISTRY_PASSWORD}"
+  # CI_ORACLE_REGISTRY=registry.gitlab.com
+  REG_REGISTRY_BASE: '${CI_ORACLE_REGISTRY}/${TENANCY_NAMESPACE}/${PROJECT_IMAGE_NM}'
+
+# 본 작업 수행 전에 실행할 script 이다.
+before_script:
+  - env
+
+# 도커로 배포 or jar로 배포 할 수 있음
+stages:
+  - build_jar
+  - build_docker
+  - deploy-docker
+  - deploy-jar
+
+build_jar:
+  image: gradle:6.9-jdk11-alpine
+  stage: build_jar
+  script:
+    - gradle clean build -x test
+  artifacts:
+    paths:
+      - ./build/libs/VirtualPhoneAgent-0.0.1-SNAPSHOT.jar
+  only:
+    - master
+    - test
+    - dev
+
+# 작업 이름이다. pipeline에서 현 단계를 보여줄 때 사용된다. stage와는 다른 개념이다.
+build_post_server:
+  # docker 이미지 빌드를 위해 사용할 docker container 이다.
+  # https://docs.gitlab.com/ce/ci/docker/using_docker_images.html#what-is-an-image
+  #   "The image keyword is the name of the Docker image the Docker executor will run to perform the CI tasks."
+  image: docker:latest
+  # https://docs.gitlab.com/ce/ci/docker/using_docker_images.html#what-is-a-service
+  services:
+    - docker:dind
+
+  # stages 에서 열거한 stage 중 현 stage를 나타낸다.
+  stage: build_docker
+  when: manual
+  script:
+    # login gitlab to push docker images later
+    - echo "- docker login -u '${REG_LOGIN_USER}' -p '${REG_LOGIN_PWD}' '${CI_ORACLE_REGISTRY}'"
+    - docker login -u "${REG_LOGIN_USER}" -p "${REG_LOGIN_PWD}" "${CI_ORACLE_REGISTRY}"
+
+    # docker 이미지를 빌드한다.
+    - docker build -t "${REG_REGISTRY_BASE}:${CI_PIPELINE_ID}" .
+
+    # docker 이미지를 gitlab의 container registry에 push한다.
+    - docker push "${REG_REGISTRY_BASE}:${CI_PIPELINE_ID}"
+  only:
+    - master
+    - test
+    - dev
+deploy-docker-with-sshkey:      # This job runs in the deploy stage.
+  stage: deploy-docker
+  #environment: production
+  when: manual
+  #  when: always
+  before_script:
+    - echo "+ before script start..."
+    #- pwd
+    #- ls -alhF .
+    #- echo "+ before script end..."
+    #- mkdir -p ~/.ssh
+    #- chmod 700 ~/.ssh
+    #- ssh-keyscan 193.123.242.100 >> ~/.ssh/known_hosts
+    #- chmod 644 ~/.ssh/known_hosts
+    - apk update
+    #- apk add --upgrade sshpass
+    #- sshpass -V
+    - 'com.sinyoung.command -v ssh-agent >/dev/null || ( apk add --update openssh )'
+    - eval $(ssh-agent -s)
+    - echo "$AGENT_SERVER_SSHKEY"
+    - echo "$AGENT_SERVER_SSHKEY" | tr -d '\r' | ssh-add -
+    #- chmod 400 "$DEV_IPPEVENT_SSH_KEY"
+    #- ssh-add "$DEV_IPPEVENT_SSH_KEY"
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - echo "+ before script end..."
+  script:
+    - echo "copy docker... start"
+    - CMD="export PATH=/usr/bin:/home/ubuntu/bin && /home/ubuntu/bin/_run_phone.sh ${CI_PIPELINE_ID}"
+    - echo -e "Executing Remote Command :\n$CMD"
+    - echo ${CMD} | ssh -T -o StrictHostKeyChecking=no -p ${AGENT_SERVER_PORT} ${AGENT_SERVER_USER_ID}@${AGENT_SERVER_IP}
+    # Pseudo-terminal will not be allocated because stdin is not a terminal.
+    # 이것 때문에 -T 옵션을 사용한다.
+    - echo "docker is restarted."
+
+  after_script:
+    - echo "this is after script start..."
+    - pwd
+    - ls -alhF .
+    - ls -alhF ./target
+    - echo "this is after script end..."
+
+deploy-jar-with-sshkey:      # This job runs in the deploy stage.
+  stage: deploy-jar  # It only runs when *both* jobs in the test stage complete successfully.
+  #environment: production
+  when: manual
+  #  when: always
+#  needs: ["build-jar"]
+  before_script:
+    - echo "+ before script start..."
+    #- pwd
+    #- ls -alhF .
+    #- echo "+ before script end..."
+    #- mkdir -p ~/.ssh
+    #- chmod 700 ~/.ssh
+    #- ssh-keyscan 193.123.242.100 >> ~/.ssh/known_hosts
+    #- chmod 644 ~/.ssh/known_hosts
+    - apk update
+    #- apk add --upgrade sshpass
+    #- sshpass -V
+    - 'com.sinyoung.command -v ssh-agent >/dev/null || ( apk add --update openssh )'
+    - eval $(ssh-agent -s)
+    - echo "$AGENT_SERVER_SSHKEY"
+    - echo "$AGENT_SERVER_SSHKEY" | tr -d '\r' | ssh-add -
+    #- chmod 400 "$DEV_IPPEVENT_SSH_KEY"
+    #- ssh-add "$DEV_IPPEVENT_SSH_KEY"
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - echo "+ before script end..."
+  script:
+    #- echo ${DEV_IPPEVENT_USERID}
+    #- echo ${DEV_IPPEVENT_PASSWORD}
+    - echo "copy jar... start"
+    - scp -P ${AGENT_SERVER_PORT} -o StrictHostKeyChecking=no ./build/libs/${PROJECT_TARGET_NAME} ${AGENT_SERVER_USER_ID}@${AGENT_SERVER_IP}:~/bin/app.jar
+    #- scp -P ${AGENT_SERVER_PORT} -o StrictHostKeyChecking=no ./target/${PROJECT_TARGET_NAME} ${AGENT_SERVER_USER_ID}@${SERVER2_IP}:~/hammer.kim/deploy-jar/bin/app-${CI_PIPELINE_ID}.jar
+    - echo "copy jar... end"
+#    - CMD="export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin:/opt/jdk-18/bin; "
+    #- CMD="nohup java -jar /home/ubuntu/bin/app.jar &"
+    #- echo -e "Executing Remote Command :\n$CMD"
+    #- echo "ssh -T -o StrictHostKeyChecking=no -p ${SERVER2_PORT} ${SERVER2_USER_ID}@${SERVER2_IP} '~/hammer.kim/deploy-jar/bin/_cmd_jar_deploy.sh restart'"
+    - ssh -T -o StrictHostKeyChecking=no -p ${AGENT_SERVER_PORT} ${AGENT_SERVER_USER_ID}@${AGENT_SERVER_IP} '~/bin/_run_jar_virtualPhoneAgent.sh'
+    # Pseudo-terminal will not be allocated because stdin is not a terminal.
+    # 이것 때문에 -T 옵션을 사용한다.
+    - echo "jar is restarted."
+
+  after_script:
+    - echo "this is after script start..."
+    - pwd
+    - ls -alhF .
+    - ls -alhF ./target
+    - echo "this is after script end..."
